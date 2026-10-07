@@ -63,10 +63,28 @@ async function mistralRequest(
   return response.json;
 }
 
+export interface ChatUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface OcrUsage {
+  pageCount: number;
+}
+
 export class MistralClient {
   readonly chatModel: string;
   readonly ocrModel: string;
   private readonly apiKey: string;
+  /** Set by the ingest controller; called after each billable API call. */
+  onUsage?: (usage: ChatUsage | OcrUsage, kind: "chat" | "ocr", model: string) => void;
+
+  private reportChatUsage(json: unknown, model: string) {
+    const usage = (json as { usage?: { prompt_tokens?: number; completion_tokens?: number } }).usage;
+    if (usage && typeof usage.prompt_tokens === "number" && typeof usage.completion_tokens === "number") {
+      this.onUsage?.({ inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens }, "chat", model);
+    }
+  }
 
   constructor(opts: MistralClientOptions) {
     this.apiKey = opts.apiKey;
@@ -87,6 +105,7 @@ export class MistralClient {
     if (!json.pages || json.pages.length === 0) {
       throw new Error("Mistral OCR returned no pages.");
     }
+    this.onUsage?.({ pageCount: json.pages.length }, "ocr", json.model ?? this.ocrModel);
     return { pages: json.pages, model: json.model ?? this.ocrModel };
   }
 
@@ -156,11 +175,13 @@ export class MistralClient {
       max_tokens: maxTokens,
     })) as {
       choices?: Array<{ message?: { content?: string } }>;
+      usage?: unknown;
     };
     const text = json.choices?.[0]?.message?.content;
     if (typeof text !== "string" || !text) {
       throw new Error("Mistral chat returned no content.");
     }
+    this.reportChatUsage(json, this.chatModel);
     return text;
   }
 }

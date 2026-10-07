@@ -2,6 +2,8 @@ import { Notice, Plugin, PluginSettingTab, Setting, TFile } from "obsidian";
 import { MistralClient } from "./mistral-client";
 import { convertPdfWithMistralOcr } from "./ocr-converter";
 import { analyzeMarkdown } from "./analyzer";
+import { CostTracker } from "./cost-tracker";
+import { ProgressModal } from "./progress-modal";
 
 export interface MistralPluginSettings {
   apiKey: string;
@@ -74,12 +76,39 @@ export class MistralWikiPlugin extends Plugin {
       chatModel: this.settings.chatModel,
       ocrModel: this.settings.ocrModel,
     });
+    const tracker = new CostTracker();
+    client.onUsage = (usage, kindOfCall, model) => {
+      if (kindOfCall === "chat" && "inputTokens" in usage) {
+        tracker.addChat(usage.inputTokens, usage.outputTokens, model);
+      } else if (kindOfCall === "ocr" && "pageCount" in usage) {
+        tracker.addOcr(usage.pageCount, model);
+      }
+    };
+
+    const modal = new ProgressModal(this.app, file.name, tracker, () => {});
+    modal.open();
 
     try {
       let markdown: string;
       if (kind === "pdf") {
-        new Notice(`Converting "${file.name}" with Mistral OCR\u2026`);
-        markdown = await convertPdfWithMistralOcr(client, this.app, file);
+        if (!(await this.hasOcrCache(file))) {
+          modal.update("upload", { status: "running" });
+        }
+        markdown = await convertPdfWithMistralOcr(client, this.app, file, (phase) => {
+          if (phase === "uploading") {
+            modal.update("upload", { status: "running", detail: "Sending PDF bytes\u2026" });
+          } else if (phase === "ocr") {
+            modal.update("upload", { status: "done" });
+            modal.update("ocr", { status: "running", detail: `Running ${this.settings.ocrModel}\u2026` });
+          }
+        });
+        const ocrEntry = tracker.summary.entries.find((e) => e.kind === "ocr");
+        if (ocrEntry) {
+          modal.update("ocr", { status: "done", detail: ocrEntry.detail });
+        } else {
+          modal.update("upload", { status: "done", detail: "Cache hit \u2014 no upload needed" });
+          modal.update("ocr", { status: "done", detail: "Served from OCR cache" });
+        }
         if (this.settings.keepOcrMarkdown) {
           const sidecar = `${file.path}.md`;
           if (!(await this.app.vault.adapter.exists(sidecar))) {
@@ -88,15 +117,23 @@ export class MistralWikiPlugin extends Plugin {
           }
         }
       } else {
+        modal.update("upload", { status: "done", detail: "Not a PDF \u2014 skipped" });
+        modal.update("ocr", { status: "done", detail: "Not a PDF \u2014 skipped" });
         markdown = await this.app.vault.read(file);
       }
 
-      new Notice(`Analyzing with ${this.settings.chatModel}\u2026`);
+      modal.update("analyze", { status: "running", detail: `Running ${this.settings.chatModel}\u2026` });
       const page = await analyzeMarkdown(client, markdown, {
         sourceName: file.basename,
         angle: this.settings.documentAngle,
       });
+      const chatEntry = [...tracker.summary.entries].reverse().find((e) => e.kind === "chat");
+      modal.update("analyze", {
+        status: "done",
+        detail: chatEntry ? chatEntry.detail : "Done",
+      });
 
+      modal.update("write", { status: "running" });
       const folder = this.settings.outputFolder;
       if (!(await this.app.vault.adapter.exists(folder))) {
         await this.app.vault.createFolder(folder);
@@ -108,13 +145,38 @@ export class MistralWikiPlugin extends Plugin {
       } else {
         await this.app.vault.create(outPath, page);
       }
-      new Notice(`Wrote ${outPath}`);
+      modal.update("write", { status: "done", detail: outPath });
       await this.app.workspace.openLinkText(outPath, "", false);
+      new Notice(`Wrote ${outPath} \u2014 est. cost ${tracker.formatTotal()}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      const failed = (["upload", "ocr", "analyze", "write"] as const).find(
+        (id) => modal.isStepRunning(id)
+      );
+      if (failed) modal.update(failed, { status: "error", detail: message });
       new Notice(`Mistral ingest failed: ${message}`);
       console.error("Mistral ingest failed:", err);
     }
+  }
+
+  private async hasOcrCache(file: TFile): Promise<boolean> {
+    try {
+      const bytes = new Uint8Array(await this.app.vault.adapter.readBinary(file.path));
+      const digest = await this.hashBytes(bytes);
+      const cacheDir = `${this.app.vault.configDir}/plugins/mistral-obsidian-plugin/ocr-cache`;
+      return this.app.vault.adapter.exists(`${cacheDir}/${digest}.md`);
+    } catch {
+      return false;
+    }
+  }
+
+  private async hashBytes(bytes: Uint8Array): Promise<string> {
+    const copy = new Uint8Array(bytes.length);
+    copy.set(bytes);
+    const digest = await crypto.subtle.digest("SHA-256", copy.buffer as ArrayBuffer);
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
   }
 }
 

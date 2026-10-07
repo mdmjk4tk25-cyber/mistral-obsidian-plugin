@@ -32,7 +32,8 @@ export function joinOcrPages(pages: Array<{ index: number; markdown: string }>):
 export async function convertPdfWithMistralOcr(
   client: MistralClient,
   app: App,
-  pdfFile: TFile
+  pdfFile: TFile,
+  onPhase?: (phase: "cache-hit" | "uploading" | "ocr") => void
 ): Promise<string> {
   const bytes = new Uint8Array(
     await app.vault.adapter.readBinary(pdfFile.path)
@@ -42,15 +43,23 @@ export async function convertPdfWithMistralOcr(
   const cachePath = `${cacheDir}/${hash}.md`;
 
   if (await app.vault.adapter.exists(cachePath)) {
+    onPhase?.("cache-hit");
     return app.vault.adapter.read(cachePath);
   }
 
-  const result = await client.ocrFile(await client.uploadPdf(bytes, pdfFile.name));
-  const markdown = joinOcrPages(result.pages);
+  onPhase?.("uploading");
+  const fileId = await client.uploadPdf(bytes, pdfFile.name);
+  try {
+    onPhase?.("ocr");
+    const result = await client.ocrFile(fileId);
+    const markdown = joinOcrPages(result.pages);
 
-  if (!(await app.vault.adapter.exists(cacheDir))) {
-    await app.vault.adapter.mkdir(cacheDir);
+    if (!(await app.vault.adapter.exists(cacheDir))) {
+      await app.vault.adapter.mkdir(cacheDir);
+    }
+    await app.vault.adapter.write(cachePath, markdown);
+    return markdown;
+  } finally {
+    await client.deleteFile(fileId);
   }
-  await app.vault.adapter.write(cachePath, markdown);
-  return markdown;
 }
