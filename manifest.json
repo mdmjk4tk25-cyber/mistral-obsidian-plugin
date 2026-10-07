@@ -1,0 +1,9 @@
+{
+  "id": "mistral-obsidian-plugin",
+  "name": "Mistral for Obsidian",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Turn PDFs and notes into linked wiki pages using Mistral OCR for conversion and a Mistral text model for analysis.",
+  "author": "mdmjk4tk25-cyber",
+  "isDesktopOnly": false
+}

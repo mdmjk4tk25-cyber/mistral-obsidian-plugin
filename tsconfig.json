@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2018",
+    "strict": true,
+    "noImplicitAny": true,
+    "declaration": false,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "lib": ["DOM", "ES2018"]
+  },
+  "include": ["src/**/*.ts"]
+}
